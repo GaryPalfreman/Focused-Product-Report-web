@@ -1,4 +1,5 @@
 import io
+import json
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -11,13 +12,8 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 DAY_SHEETS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-REQUIRED_DAY_COLUMNS = [
-    "Machine Name",
-    "Manufacturing Order",
-    "Product Name",
-    "Operation Number",
-    "Completed Quantity",
-]
+REQUIRED_DAY_COLUMNS = ["Machine Name", "Manufacturing Order", "Product Name", "Operation Number", "Completed Quantity"]
+DAILY_JSON_VERSION = 1
 
 
 def load_workbook(file_bytes: bytes) -> dict[str, pd.DataFrame]:
@@ -29,14 +25,10 @@ def validate_workbook(sheets: dict[str, pd.DataFrame]) -> list[str]:
     errors = []
     if "Daily And Weekly Total" not in sheets:
         errors.append("Missing required sheet: Daily And Weekly Total")
-
     for day in DAY_SHEETS:
-        if day not in sheets:
+        if day not in sheets or sheets[day].empty:
             continue
-        df = sheets[day]
-        if df.empty:
-            continue
-        missing = [c for c in REQUIRED_DAY_COLUMNS if c not in df.columns]
+        missing = [c for c in REQUIRED_DAY_COLUMNS if c not in sheets[day].columns]
         if missing:
             errors.append(f"{day}: missing column(s): {', '.join(missing)}")
     return errors
@@ -46,10 +38,13 @@ def clean_day_data(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "Date" in out.columns:
         out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
-    if "Completed Quantity" in out.columns:
-        out["Completed Quantity"] = pd.to_numeric(out["Completed Quantity"], errors="coerce").fillna(0)
-    if "Rejected Quantity" in out.columns:
-        out["Rejected Quantity"] = pd.to_numeric(out["Rejected Quantity"], errors="coerce").fillna(0)
+    for col in ["Completed Quantity", "Rejected Quantity", "Accepted Quantity"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    if "Rejected Quantity" not in out.columns:
+        out["Rejected Quantity"] = 0
+    if "Accepted Quantity" not in out.columns and "Completed Quantity" in out.columns:
+        out["Accepted Quantity"] = out["Completed Quantity"] - out["Rejected Quantity"]
     return out
 
 
@@ -90,32 +85,24 @@ def filter_product(sheets: dict[str, pd.DataFrame], product: str | None) -> dict
 def summary_metrics(sheets: dict[str, pd.DataFrame]) -> dict:
     total_completed = 0.0
     total_rejected = 0.0
-    machines = set()
-    orders = set()
-    products = set()
+    machines, orders, products = set(), set(), set()
     daily = []
-
     for day in available_day_sheets(sheets):
         df = clean_day_data(sheets[day])
         completed = float(df.get("Completed Quantity", pd.Series(dtype=float)).sum())
-        rejected = float(df.get("Rejected Quantity", pd.Series(dtype=float)).sum()) if "Rejected Quantity" in df.columns else 0.0
+        rejected = float(df.get("Rejected Quantity", pd.Series(dtype=float)).sum())
         total_completed += completed
         total_rejected += rejected
-        if "Machine Name" in df.columns:
-            machines.update(str(v) for v in df["Machine Name"].dropna())
-        if "Manufacturing Order" in df.columns:
-            orders.update(str(v) for v in df["Manufacturing Order"].dropna())
-        if "Product Name" in df.columns:
-            products.update(str(v) for v in df["Product Name"].dropna())
+        machines.update(str(v) for v in df.get("Machine Name", pd.Series(dtype=str)).dropna())
+        orders.update(str(v) for v in df.get("Manufacturing Order", pd.Series(dtype=str)).dropna())
+        products.update(str(v) for v in df.get("Product Name", pd.Series(dtype=str)).dropna())
         daily.append({"Day": day, "Completed Quantity": completed, "Rejected Quantity": rejected})
-
     accepted = total_completed - total_rejected
-    rejection_rate = (total_rejected / total_completed * 100) if total_completed else 0.0
     return {
         "completed": total_completed,
         "rejected": total_rejected,
         "accepted": accepted,
-        "rejection_rate": rejection_rate,
+        "rejection_rate": (total_rejected / total_completed * 100) if total_completed else 0.0,
         "machines": len(machines),
         "orders": len(orders),
         "products": len(products),
@@ -131,24 +118,119 @@ def machine_totals(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frames = []
     for day in available_day_sheets(sheets):
         df = clean_day_data(sheets[day])
-        if "Machine Name" in df.columns and "Completed Quantity" in df.columns:
-            frames.append(df[["Machine Name", "Completed Quantity"]])
+        if "Machine Name" in df.columns:
+            frames.append(df[["Machine Name", "Completed Quantity", "Rejected Quantity", "Accepted Quantity"]])
     if not frames:
-        return pd.DataFrame(columns=["Machine Name", "Completed Quantity"])
-    out = pd.concat(frames, ignore_index=True).groupby("Machine Name", as_index=False)["Completed Quantity"].sum()
-    return out.sort_values("Completed Quantity", ascending=False)
+        return pd.DataFrame(columns=["Machine Name", "Completed Quantity", "Rejected Quantity", "Accepted Quantity"])
+    return pd.concat(frames, ignore_index=True).groupby("Machine Name", as_index=False).sum(numeric_only=True).sort_values("Accepted Quantity", ascending=False)
 
 
 def product_totals(sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frames = []
     for day in available_day_sheets(sheets):
         df = clean_day_data(sheets[day])
-        if "Product Name" in df.columns and "Completed Quantity" in df.columns:
-            frames.append(df[["Product Name", "Completed Quantity"]])
+        if "Product Name" in df.columns:
+            frames.append(df[["Product Name", "Completed Quantity", "Rejected Quantity", "Accepted Quantity"]])
     if not frames:
-        return pd.DataFrame(columns=["Product Name", "Completed Quantity"])
-    out = pd.concat(frames, ignore_index=True).groupby("Product Name", as_index=False)["Completed Quantity"].sum()
-    return out.sort_values("Completed Quantity", ascending=False)
+        return pd.DataFrame(columns=["Product Name", "Completed Quantity", "Rejected Quantity", "Accepted Quantity"])
+    return pd.concat(frames, ignore_index=True).groupby("Product Name", as_index=False).sum(numeric_only=True).sort_values("Accepted Quantity", ascending=False)
+
+
+def make_daily_payload(report_date, product_name: str, records: list[dict]) -> dict:
+    date_text = pd.to_datetime(report_date).strftime("%Y-%m-%d")
+    clean_records = []
+    for row in records:
+        completed = float(row.get("Completed Quantity", 0) or 0)
+        rejected = float(row.get("Rejected Quantity", 0) or 0)
+        clean_records.append({
+            "Machine Name": str(row.get("Machine Name", "")).strip(),
+            "Manufacturing Order": str(row.get("Manufacturing Order", "")).strip(),
+            "Product Name": product_name.strip(),
+            "Operation Number": str(row.get("Operation Number", "")).strip(),
+            "Completed Quantity": completed,
+            "Rejected Quantity": rejected,
+            "Accepted Quantity": completed - rejected,
+        })
+    return {"schema": "focused-product-daily", "version": DAILY_JSON_VERSION, "date": date_text, "product_name": product_name.strip(), "records": clean_records}
+
+
+def daily_payload_bytes(payload: dict) -> bytes:
+    return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+def load_daily_payload(file_bytes: bytes) -> dict:
+    payload = json.loads(file_bytes.decode("utf-8"))
+    if payload.get("schema") != "focused-product-daily":
+        raise ValueError("This is not a Focused Product daily JSON file.")
+    if not payload.get("date") or not payload.get("product_name") or not isinstance(payload.get("records"), list):
+        raise ValueError("Daily JSON is missing date, product_name, or records.")
+    pd.to_datetime(payload["date"], format="%Y-%m-%d", errors="raise")
+    return payload
+
+
+def payloads_to_dataframe(payloads: list[dict]) -> pd.DataFrame:
+    rows = []
+    for payload in sorted(payloads, key=lambda p: p["date"]):
+        for record in payload["records"]:
+            row = dict(record)
+            row["Date"] = payload["date"]
+            row["Product Name"] = payload["product_name"]
+            rows.append(row)
+    cols = ["Date", "Machine Name", "Manufacturing Order", "Product Name", "Operation Number", "Completed Quantity", "Rejected Quantity", "Accepted Quantity"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows)
+    for col in ["Completed Quantity", "Rejected Quantity", "Accepted Quantity"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    return df[cols].sort_values(["Date", "Manufacturing Order", "Operation Number"], kind="stable").reset_index(drop=True)
+
+
+def validate_payload_collection(payloads: list[dict]) -> tuple[list[dict], list[str]]:
+    if not payloads:
+        return [], []
+    ordered = sorted(payloads, key=lambda p: p["date"])
+    errors = []
+    products = sorted({p["product_name"].strip() for p in ordered})
+    if len(products) > 1:
+        errors.append("Uploaded daily files contain more than one focused product: " + ", ".join(products))
+    seen = set()
+    for p in ordered:
+        if p["date"] in seen:
+            errors.append(f"Duplicate daily file date: {p['date']}")
+        seen.add(p["date"])
+    return ordered, errors
+
+
+def filter_period_payloads(payloads: list[dict], period: str, anchor_date) -> list[dict]:
+    anchor = pd.Timestamp(anchor_date)
+    selected = []
+    for payload in payloads:
+        d = pd.Timestamp(payload["date"])
+        include = False
+        if period == "Weekly":
+            include = d.to_period("W-SUN") == anchor.to_period("W-SUN")
+        elif period == "Monthly":
+            include = d.year == anchor.year and d.month == anchor.month
+        elif period == "Yearly":
+            include = d.year == anchor.year
+        if include:
+            selected.append(payload)
+    return sorted(selected, key=lambda p: p["date"])
+
+
+def aggregate_dataframe(df: pd.DataFrame) -> dict:
+    if df.empty:
+        empty = pd.DataFrame()
+        return {"completed": 0.0, "rejected": 0.0, "accepted": 0.0, "rejection_rate": 0.0, "days": 0, "machines": 0, "orders": 0, "daily": empty, "machine": empty, "monthly": empty}
+    completed = float(df["Completed Quantity"].sum())
+    rejected = float(df["Rejected Quantity"].sum())
+    daily = df.groupby("Date", as_index=False)[["Completed Quantity", "Rejected Quantity", "Accepted Quantity"]].sum().sort_values("Date")
+    machine = df.groupby("Machine Name", as_index=False)[["Completed Quantity", "Rejected Quantity", "Accepted Quantity"]].sum().sort_values("Accepted Quantity", ascending=False)
+    monthly_df = df.copy()
+    monthly_df["Month"] = monthly_df["Date"].dt.to_period("M").astype(str)
+    monthly = monthly_df.groupby("Month", as_index=False)[["Completed Quantity", "Rejected Quantity", "Accepted Quantity"]].sum().sort_values("Month")
+    return {"completed": completed, "rejected": rejected, "accepted": completed - rejected, "rejection_rate": (rejected / completed * 100) if completed else 0.0, "days": int(df["Date"].dt.date.nunique()), "machines": int(df["Machine Name"].nunique()), "orders": int(df["Manufacturing Order"].nunique()), "daily": daily, "machine": machine, "monthly": monthly}
 
 
 def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, rotate: int = 0) -> bytes:
@@ -163,9 +245,8 @@ def make_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, rotate: int = 0
         ax.set_ylabel(y)
         ax.tick_params(axis="x", rotation=rotate)
         for bar in bars:
-            height = bar.get_height()
-            ax.annotate(f"{height:.0f}", (bar.get_x() + bar.get_width() / 2, height),
-                        textcoords="offset points", xytext=(0, 3), ha="center", fontsize=8)
+            h = bar.get_height()
+            ax.annotate(f"{h:.0f}", (bar.get_x() + bar.get_width()/2, h), textcoords="offset points", xytext=(0, 3), ha="center", fontsize=8)
         fig.tight_layout()
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
@@ -181,83 +262,53 @@ def dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return out.fillna("")
 
 
-def _table_from_df(df: pd.DataFrame, max_rows: int = 40) -> Table:
+def _table_from_df(df: pd.DataFrame, max_rows: int = 80) -> Table:
     display = dataframe_for_display(df.head(max_rows))
     data = [list(display.columns)] + [[str(v) for v in row] for row in display.itertuples(index=False, name=None)]
-    if not data or len(data) == 1:
+    if len(data) == 1:
         data = [["No data"]]
     table = Table(data, repeatRows=1, hAlign="CENTER")
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2f3e46")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2f3e46")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, -1), 6.3),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey), ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f4f6")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 2.5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2.5), ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
     ]))
     return table
 
 
-def generate_pdf(sheets: dict[str, pd.DataFrame], product_label: str | None = None) -> bytes:
-    start_date, end_date = date_range(sheets)
-    metrics = summary_metrics(sheets)
-    title = "Focused Product Report"
-    if product_label:
-        title += f" - {product_label}"
-
+def generate_period_pdf(df: pd.DataFrame, product_name: str, period_label: str) -> bytes:
+    metrics = aggregate_dataframe(df)
+    start = df["Date"].min().strftime("%Y-%m-%d") if not df.empty else "N/A"
+    end = df["Date"].max().strftime("%Y-%m-%d") if not df.empty else "N/A"
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     styles = getSampleStyleSheet()
     centered = ParagraphStyle("centered", parent=styles["Title"], alignment=TA_CENTER, fontSize=20, spaceAfter=12)
     heading = ParagraphStyle("heading", parent=styles["Heading2"], spaceBefore=6, spaceAfter=6)
-
-    story = [
-        Spacer(1, 45*mm),
-        Paragraph(title, centered),
-        Paragraph(f"From: {start_date}", ParagraphStyle("c1", parent=styles["Normal"], alignment=TA_CENTER, fontSize=11)),
-        Paragraph(f"To: {end_date}", ParagraphStyle("c2", parent=styles["Normal"], alignment=TA_CENTER, fontSize=11)),
-        Spacer(1, 12*mm),
-        Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ParagraphStyle("c3", parent=styles["Normal"], alignment=TA_CENTER, fontSize=9)),
-        PageBreak(),
-    ]
-
-    summary_df = pd.DataFrame([
-        ["Completed", f"{metrics['completed']:.0f}"],
-        ["Rejected", f"{metrics['rejected']:.0f}"],
-        ["Accepted", f"{metrics['accepted']:.0f}"],
-        ["Rejection Rate", f"{metrics['rejection_rate']:.2f}%"],
-        ["Machines", metrics["machines"]],
-        ["Manufacturing Orders", metrics["orders"]],
-    ], columns=["Metric", "Value"])
-    story += [Paragraph("Weekly Summary", heading), _table_from_df(summary_df), Spacer(1, 6*mm)]
-
-    daily = daily_totals_table(sheets)
-    chart = make_bar_chart(daily, "Day", "Completed Quantity", "Daily Completed Quantity")
-    story += [Image(io.BytesIO(chart), width=185*mm, height=105*mm), Spacer(1, 4*mm), _table_from_df(daily), PageBreak()]
-
-    machines = machine_totals(sheets)
-    if not machines.empty:
-        chart = make_bar_chart(machines, "Machine Name", "Completed Quantity", "Completed Quantity by Machine", 25)
-        story += [Paragraph("Machine Performance", heading), Image(io.BytesIO(chart), width=185*mm, height=105*mm), Spacer(1, 4*mm), _table_from_df(machines), PageBreak()]
-
-    for day in available_day_sheets(sheets):
-        df = clean_day_data(sheets[day])
-        if df.empty:
-            continue
-        story.append(Paragraph(f"{day} Production Data", heading))
-        if "Date" in df.columns and "Completed Quantity" in df.columns:
-            chart_df = df.copy()
-            chart_df["Date Label"] = chart_df["Date"].dt.strftime("%Y-%m-%d").fillna(day)
-            grouped = chart_df.groupby("Date Label", as_index=False)["Completed Quantity"].sum()
-            chart = make_bar_chart(grouped, "Date Label", "Completed Quantity", f"{day} Production", 25)
-            story.append(Image(io.BytesIO(chart), width=185*mm, height=100*mm))
-            story.append(Spacer(1, 3*mm))
-        story.append(_table_from_df(df, max_rows=60))
-        story.append(PageBreak())
-
+    story = [Spacer(1, 38*mm), Paragraph(f"{period_label} Focused Product Report", centered), Paragraph(product_name, ParagraphStyle("p", parent=styles["Heading2"], alignment=TA_CENTER)), Paragraph(f"From: {start}", ParagraphStyle("c1", parent=styles["Normal"], alignment=TA_CENTER)), Paragraph(f"To: {end}", ParagraphStyle("c2", parent=styles["Normal"], alignment=TA_CENTER)), Spacer(1, 8*mm), Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ParagraphStyle("c3", parent=styles["Normal"], alignment=TA_CENTER, fontSize=9)), PageBreak()]
+    summary = pd.DataFrame([["Completed", f"{metrics['completed']:.0f}"], ["Rejected", f"{metrics['rejected']:.0f}"], ["Accepted", f"{metrics['accepted']:.0f}"], ["Rejection Rate", f"{metrics['rejection_rate']:.2f}%"], ["Production Days", metrics["days"]], ["Machines", metrics["machines"]], ["Manufacturing Orders", metrics["orders"]]], columns=["Metric", "Value"])
+    story += [Paragraph("Period Summary", heading), _table_from_df(summary), Spacer(1, 5*mm)]
+    if not metrics["daily"].empty:
+        chart_df = metrics["daily"].copy(); chart_df["Date"] = chart_df["Date"].dt.strftime("%Y-%m-%d")
+        story += [Image(io.BytesIO(make_bar_chart(chart_df, "Date", "Accepted Quantity", "Accepted Production by Date", 45)), width=185*mm, height=105*mm), Spacer(1, 3*mm), _table_from_df(chart_df), PageBreak()]
+    if not metrics["machine"].empty:
+        story += [Paragraph("Machine Performance", heading), Image(io.BytesIO(make_bar_chart(metrics["machine"], "Machine Name", "Accepted Quantity", "Accepted Quantity by Machine", 30)), width=185*mm, height=105*mm), Spacer(1, 3*mm), _table_from_df(metrics["machine"]), PageBreak()]
+    if period_label == "Yearly" and not metrics["monthly"].empty:
+        story += [Paragraph("Month by Month", heading), Image(io.BytesIO(make_bar_chart(metrics["monthly"], "Month", "Accepted Quantity", "Monthly Accepted Production", 30)), width=185*mm, height=105*mm), Spacer(1, 3*mm), _table_from_df(metrics["monthly"]), PageBreak()]
+    story += [Paragraph("Production Records", heading), _table_from_df(df, max_rows=250)]
     doc.build(story)
     return buffer.getvalue()
+
+
+def generate_pdf(sheets: dict[str, pd.DataFrame], product_label: str | None = None) -> bytes:
+    frames = []
+    for day in available_day_sheets(sheets):
+        df = clean_day_data(sheets[day])
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return generate_period_pdf(pd.DataFrame(columns=["Date", "Machine Name", "Manufacturing Order", "Product Name", "Operation Number", "Completed Quantity", "Rejected Quantity", "Accepted Quantity"]), product_label or "All products", "Weekly")
+    combined = pd.concat(frames, ignore_index=True)
+    return generate_period_pdf(combined, product_label or "All products", "Weekly")
