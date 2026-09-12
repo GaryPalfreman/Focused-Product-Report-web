@@ -1,90 +1,90 @@
 # Focused Product Report Web
 
-Focused-product production reporting app built with Streamlit.
+Focused-product production entry and management reporting app built with Streamlit.
 
 Live app: https://focused-pr0duct-report.streamlit.app
 
-## Recommended workflow
-
-The app no longer requires an Excel workbook for normal use.
+## Main workflow
 
 1. Open **Daily Entry**.
-2. Choose the production date and enter the single focused product being tracked.
-3. Enter one or more production records for that product.
-4. Download that day's JSON file to the local computer.
+2. Set production date, focused product, daily target and entered-by name/initials.
+3. Add production records using the form interface.
+4. Download the dated JSON file and, when required, the print-friendly Daily Confirmation PDF.
 5. Repeat for each production day.
-6. Open **Build Period Report** and upload the required daily JSON files.
-7. Generate a **Weekly**, **Monthly**, or **Yearly** Focused Product Report PDF.
+6. Open **Build Period Report** and upload the relevant daily JSON files.
+7. Generate **Weekly**, **Monthly**, or **Yearly** Focused Product management reports.
 
-Daily files are sorted by the date stored inside the JSON, not by upload order or filename.
+The app sorts daily files by the production date stored inside each JSON file rather than upload order or filename.
 
-## Daily entry fields
+## Daily entry improvements
 
-Each production record contains:
+- Modern form-style entry rather than spreadsheet-style editing
+- Recent machine and operation values remembered for the active browser session
+- Quick **Duplicate Last Record** action
+- Daily production target and live variance / attainment
+- Completed, Rejected and automatically calculated Accepted quantities
+- Comments / issues field
+- Downtime reason field
+- Entered-by traceability
+- Entry timestamps
+- Edit / remove controls for existing records
+- Existing JSON files can be loaded back into Daily Entry and corrected
+- Print-friendly daily confirmation PDF with sign-off line
 
-- Machine Name
-- Manufacturing Order
-- Operation Number
-- Completed Quantity
-- Rejected Quantity
-- Accepted Quantity, calculated automatically as Completed - Rejected
+## Daily JSON schema
 
-The production date and focused product name are stored once at daily-file level and applied to all records in that file.
-
-## Daily JSON format
-
-Daily downloads use the Focused Product JSON schema:
+Current files use schema version 2 while the loader remains compatible with older version-1 files.
 
 ```json
 {
   "schema": "focused-product-daily",
-  "version": 1,
+  "version": 2,
   "date": "2026-09-12",
   "product_name": "AT7701",
+  "daily_target": 250,
+  "entered_by": "GP",
   "records": []
 }
 ```
 
-Existing daily JSON files can be uploaded back into **Daily Entry** and edited before downloading a replacement file.
+## Weekly / Monthly / Yearly reports
 
-## Period reports
+Period reports include:
 
-### Weekly
+- Completed, Rejected and Accepted production
+- Daily and period production targets
+- Variance to target
+- Target attainment percentage
+- Rejection rate
+- Missing expected production-day warnings
+- Chronological production vs target chart
+- Previous-week / previous-month / previous-year comparison when the required JSON files are uploaded
+- Best and lowest-output day
+- Top and lowest-output machine
+- Machine performance tables and charts
+- Month-by-month yearly view
+- Management summary page in the generated PDF
+- Production record detail including comments, downtime and traceability fields
 
-Choose a date in the desired week. The app includes uploaded daily JSON files in that Monday-Sunday reporting week and produces chronological daily production, machine performance, KPIs and PDF output.
+## Weekly backup package
 
-### Monthly
+Weekly reports can also produce a ZIP backup containing:
 
-Choose a date in the required month. All uploaded daily files from that calendar month are combined chronologically.
+- All included daily JSON files
+- `ARCHIVE_INFO.txt`
+- `MANIFEST_SHA256.txt`
 
-### Yearly
-
-Choose a date in the required year. All uploaded daily files from that calendar year are combined. The annual report also includes a month-by-month production summary.
-
-The application rejects a combined set when uploaded files contain more than one focused product or duplicate production dates. This keeps each report dedicated to one product only.
-
-## Report metrics
-
-- Completed Quantity
-- Rejected Quantity
-- Accepted Quantity
-- Rejection Rate
-- Production Days
-- Machines Used
-- Manufacturing Orders
-- Daily chronological totals
-- Machine performance
-- Monthly trend in yearly reports
+The SHA-256 manifest can be used to verify that archived JSON files have not changed since the backup package was created.
 
 ## Legacy Excel support
 
-The previous Excel workflow remains available under **Legacy Excel Upload** for older weekly workbooks. It reads the original Monday-Saturday and `Daily And Weekly Total` workbook structure, but the report itself remains focused on one selected product.
+The previous Excel workflow remains under **Legacy Excel Upload** for older Monday-Saturday workbooks. It remains focused on one selected product.
 
 ## Privacy / storage
 
-The application does not deliberately persist daily JSON files, Excel files, or generated reports. Downloads are the intended method of keeping data on the user's computer.
+The application does not deliberately persist uploaded production files or generated reports. JSON, PDF and ZIP downloads are the intended persistence method.
 
-Because the public app is hosted by Streamlit, anything uploaded to the public deployment is transmitted to the hosted Streamlit process for temporary processing. For information that must never leave the local computer, run the application locally.
+Because the public app is hosted by Streamlit, uploaded files are transmitted to the hosted Streamlit process for temporary processing. For information that must never leave the local computer, run the application locally.
 
 ## Streamlit Community Cloud
 
